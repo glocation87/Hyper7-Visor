@@ -43,3 +43,7 @@ grabs SVM first otherwise).
 - AMD64 Architecture Programmer's Manual Vol. 2 (System Programming), 24593
 - tandasat/SimpleSvm
 - jonomango/hv
+
+
+# Credits
+https://github.com/IceCoaled/Amd-Hypervisor-Base ~ IceCoaled, HV Base
