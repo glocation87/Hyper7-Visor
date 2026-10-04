@@ -178,6 +178,8 @@ NTSTATUS h7_shutdown(void)
 
     NTSTATUS st = h7_run_on_all_cpus(h7_devirt_cpu, NULL);
 
+    h7_hook_cleanup();
+
     if (g_npt->msrpm)
         MmFreeContiguousMemory(g_npt->msrpm);
     ExFreePoolWithTag(g_npt, 'h7np');

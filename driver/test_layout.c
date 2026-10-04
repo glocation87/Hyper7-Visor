@@ -144,6 +144,17 @@ void test_stats_abi(void)
     CHECK(h7_stats_out, cpuid,       8);
     CHECK(h7_stats_out, npf,         56);
     CHECK(h7_stats_out, injected_ud, 64);
+
+    printf("-- h7_hook_info --\n");
+    CHECK_SIZE(h7_hook_info, 24);
+
+    printf("-- h7_hook_req --\n");
+    CHECK_SIZE(h7_hook_req, 8 + 4096);
+
+    printf("-- h7_read_gva_req --\n");
+    CHECK(h7_read_gva_req, cr3, 0);
+    CHECK(h7_read_gva_req, gva, 8);
+    CHECK(h7_read_gva_req, len, 16);
 }
 
 int main(void)

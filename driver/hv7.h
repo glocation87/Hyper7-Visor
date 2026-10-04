@@ -34,6 +34,16 @@ void     h7_io_cleanup(PDRIVER_OBJECT drv);
 
 ULONG64 h7_hypercall(ULONG64 num, ULONG64 a1, ULONG64 a2, ULONG64 a3);
 
+NTSTATUS h7_gva_to_gpa(ULONG64 cr3, ULONG64 gva, ULONG64 *gpa_out);
+NTSTATUS h7_read_gva(ULONG64 cr3, ULONG64 gva, void *out, ULONG len);
+NTSTATUS h7_write_gva(ULONG64 cr3, ULONG64 gva, const void *in, ULONG len);
+
+NTSTATUS h7_hook_install(ULONG64 target_gpa, const UCHAR *patched);
+NTSTATUS h7_hook_remove(ULONG64 target_gpa);
+ULONG    h7_hook_list(h7_hook_info *out, ULONG max);
+BOOLEAN  h7_hook_handle_npf(ULONG64 gpa, BOOLEAN exec_fault);
+void     h7_hook_cleanup(void);
+
 #define H7_LOG(fmt, ...) do {                           \
     if (!KD_DEBUGGER_NOT_PRESENT)                       \
         DbgPrint("[h7] " fmt "\n", ##__VA_ARGS__);      \

@@ -8,7 +8,15 @@ h7_stats *h7_get_stats(void) { return &g_stats; }
 #define CR3_RING_SZ 256
 static ULONG64 g_cr3_ring[CR3_RING_SZ];
 static volatile LONG g_cr3_head = 0;
-static volatile LONG g_cr3_watch = 0;    // bool, togglable via hypercall
+static volatile LONG g_cr3_watch = 0;
+
+static volatile LONG64 g_lstar_real   = 0;   // actual value on hw
+static volatile LONG64 g_lstar_shadow = 0;   // value we return to guest reads
+static volatile LONG   g_lstar_shim   = 0;   // if nonzero, return shadow on reads
+
+#define LSTAR_RING_SZ 64
+static ULONG64 g_lstar_ring[LSTAR_RING_SZ];
+static volatile LONG g_lstar_head = 0;
 
 static void inject_ud(h7_vcpu *cpu)
 {
@@ -69,14 +77,21 @@ static void on_msr(h7_vcpu *cpu, h7_exit_ctx *ectx)
         v.HighPart = (ULONG)(ectx->gprs->rdx & 0xFFFFFFFF);
 
         if (msr == MSR_EFER) {
-            // guest can't clear SVME while we're running on top of it
             v.QuadPart |= EFER_SVME;
             cpu->guest_vmcb.save.efer = v.QuadPart;
+        } else if (msr == MSR_LSTAR) {
+            InterlockedExchange64(&g_lstar_real, v.QuadPart);
+            LONG slot = InterlockedIncrement(&g_lstar_head) - 1;
+            g_lstar_ring[slot & (LSTAR_RING_SZ - 1)] = v.QuadPart;
         }
         __writemsr(msr, v.QuadPart);
     } else {
         ULARGE_INTEGER v;
-        v.QuadPart = __readmsr(msr);
+        if (msr == MSR_LSTAR && g_lstar_shim) {
+            v.QuadPart = g_lstar_shadow;
+        } else {
+            v.QuadPart = __readmsr(msr);
+        }
         ectx->gprs->rax = v.LowPart;
         ectx->gprs->rdx = v.HighPart;
     }
@@ -138,11 +153,19 @@ static void on_cr3_write(h7_vcpu *cpu, h7_exit_ctx *ectx)
 
 static void on_npf(h7_vcpu *cpu)
 {
-    // fault address is in exit_info2; info1 bits describe the access
     ULONG64 gpa  = cpu->guest_vmcb.control.exit_info2;
     ULONG64 info = cpu->guest_vmcb.control.exit_info1;
-    H7_LOG("NPF gpa=%llx info=%llx rip=%llx", gpa, info, cpu->guest_vmcb.save.rip);
-    // for now re-enter guest; identity map should prevent legitimate faults
+
+    // info1 bit 4 = instruction fetch
+    BOOLEAN exec_fault = (info & (1ULL << 4)) != 0;
+
+    if (h7_hook_handle_npf(gpa, exec_fault)) {
+        // flipping the PTE needs a TLB flush of the stale NPT mapping
+        cpu->guest_vmcb.control.tlb_control = 1;
+        return;
+    }
+
+    H7_LOG("unhooked NPF gpa=%llx info=%llx rip=%llx", gpa, info, cpu->guest_vmcb.save.rip);
 }
 
 static ULONG64 do_hypercall(h7_vcpu *cpu, h7_gp_regs *gprs)
@@ -178,7 +201,6 @@ static ULONG64 do_hypercall(h7_vcpu *cpu, h7_gp_regs *gprs)
         return 0;
 
     case HC_CR3_SAMPLE: {
-        // caller provides &out_u64, we fill with the most recent cr3 value
         if (!a1) return 0;
         LONG head = g_cr3_head;
         if (head == 0) return 0;
@@ -186,6 +208,55 @@ static ULONG64 do_hypercall(h7_vcpu *cpu, h7_gp_regs *gprs)
         *(ULONG64 *)a1 = v;
         return 1;
     }
+
+    case HC_LSTAR_READ:
+        return (ULONG64)g_lstar_real;
+
+    case HC_LSTAR_SHIM:
+        // a1: 1=enable 0=disable, a2: shadow value to return
+        InterlockedExchange64(&g_lstar_shadow, (LONG64)a2);
+        InterlockedExchange(&g_lstar_shim, (LONG)(a1 ? 1 : 0));
+        return 0;
+
+    case HC_LSTAR_HISTORY: {
+        if (!a1) return 0;
+        LONG head = g_lstar_head;
+        ULONG64 *out = (ULONG64 *)a1;
+        ULONG max = (ULONG)a2;
+        ULONG n = head < (LONG)max ? (ULONG)head : max;
+        for (ULONG i = 0; i < n; i++)
+            out[i] = g_lstar_ring[(head - 1 - i) & (LSTAR_RING_SZ - 1)];
+        return n;
+    }
+
+    case HC_READ_GVA: {
+        // a1 = &req, a2 = out buf
+        h7_read_gva_req *req = (h7_read_gva_req *)a1;
+        if (!req || !a2) return (ULONG64)-1;
+        ULONG64 cr3 = req->cr3 ? req->cr3 : cpu->guest_vmcb.save.cr3;
+        NTSTATUS st = h7_read_gva(cr3, req->gva, (void *)a2, req->len);
+        return NT_SUCCESS(st) ? req->len : 0;
+    }
+
+    case HC_WRITE_GVA: {
+        h7_read_gva_req *req = (h7_read_gva_req *)a1;
+        if (!req || !a2) return (ULONG64)-1;
+        ULONG64 cr3 = req->cr3 ? req->cr3 : cpu->guest_vmcb.save.cr3;
+        NTSTATUS st = h7_write_gva(cr3, req->gva, (void *)a2, req->len);
+        return NT_SUCCESS(st) ? req->len : 0;
+    }
+
+    case HC_HOOK_INSTALL: {
+        h7_hook_req *req = (h7_hook_req *)a1;
+        if (!req) return (ULONG64)-1;
+        return (ULONG64)h7_hook_install(req->target_gpa, req->patched);
+    }
+
+    case HC_HOOK_REMOVE:
+        return (ULONG64)h7_hook_remove(a1);
+
+    case HC_HOOK_LIST:
+        return h7_hook_list((h7_hook_info *)a1, (ULONG)a2);
 
     default:
         return (ULONG64)-1;

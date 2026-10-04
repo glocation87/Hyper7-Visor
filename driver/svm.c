@@ -57,6 +57,13 @@ void h7_build_npt(h7_npt *t)
     }
 }
 
+// bit for an MSR in range 0xC0000000-0xC0001FFF: bit 0 = read, bit 1 = write
+static ULONG msrpm_bit(ULONG msr, BOOLEAN write)
+{
+    ULONG off = (msr - 0xC0000000) * 2;
+    return (0x800 * 8) + off + (write ? 1 : 0);
+}
+
 void h7_build_msrpm(void *map)
 {
     RtlZeroMemory(map, MSRPM_SIZE);
@@ -64,9 +71,9 @@ void h7_build_msrpm(void *map)
     RTL_BITMAP bm;
     RtlInitializeBitMap(&bm, (PULONG)map, MSRPM_SIZE * 8);
 
-    // EFER is 0xC0000080: 2 bits per msr, second range starts at byte 0x800, +1 for write bit
-    ULONG bit_pos = (0x800 * 8) + (0x80 * 2) + 1;
-    RtlSetBit(&bm, bit_pos);
+    RtlSetBit(&bm, msrpm_bit(MSR_EFER,  TRUE));   // guest can't clear SVME
+    RtlSetBit(&bm, msrpm_bit(MSR_LSTAR, TRUE));   // trace syscall handler installs
+    RtlSetBit(&bm, msrpm_bit(MSR_LSTAR, FALSE));  // and reads (so our shadow is seen)
 }
 
 USHORT h7_seg_attrib(ULONG64 gdt_base, USHORT sel)

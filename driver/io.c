@@ -67,6 +67,46 @@ static NTSTATUS on_ioctl(PDEVICE_OBJECT dev, PIRP irp)
         return complete(irp, STATUS_SUCCESS, sizeof(ULONG64));
     }
 
+    case IOCTL_H7_LSTAR: {
+        if (out_len < sizeof(ULONG64))
+            return complete(irp, STATUS_BUFFER_TOO_SMALL, 0);
+        *(ULONG64 *)buf = h7_hypercall(HC_LSTAR_READ, 0, 0, 0);
+        return complete(irp, STATUS_SUCCESS, sizeof(ULONG64));
+    }
+
+    case IOCTL_H7_READ_GVA: {
+        ULONG in_len = sp->Parameters.DeviceIoControl.InputBufferLength;
+        if (in_len < sizeof(h7_read_gva_req))
+            return complete(irp, STATUS_BUFFER_TOO_SMALL, 0);
+        h7_read_gva_req *req = buf;
+        if (req->len == 0 || req->len > out_len || req->len > PAGE_SIZE)
+            return complete(irp, STATUS_INVALID_PARAMETER, 0);
+        ULONG64 cr3 = req->cr3;
+        if (!cr3) {
+            // sample from the cr3 ring
+            h7_hypercall(HC_CR3_SAMPLE, (ULONG64)&cr3, 0, 0);
+            if (!cr3) return complete(irp, STATUS_DEVICE_NOT_READY, 0);
+        }
+        NTSTATUS st = h7_read_gva(cr3, req->gva, buf, req->len);
+        return complete(irp, st, NT_SUCCESS(st) ? req->len : 0);
+    }
+
+    case IOCTL_H7_HOOK_ADD: {
+        ULONG in_len = sp->Parameters.DeviceIoControl.InputBufferLength;
+        if (in_len < sizeof(h7_hook_req))
+            return complete(irp, STATUS_BUFFER_TOO_SMALL, 0);
+        h7_hook_req *req = buf;
+        NTSTATUS st = h7_hook_install(req->target_gpa, req->patched);
+        return complete(irp, st, 0);
+    }
+
+    case IOCTL_H7_HOOK_LIST: {
+        ULONG max = out_len / sizeof(h7_hook_info);
+        if (max == 0) return complete(irp, STATUS_BUFFER_TOO_SMALL, 0);
+        ULONG n = h7_hook_list(buf, max);
+        return complete(irp, STATUS_SUCCESS, n * sizeof(h7_hook_info));
+    }
+
     case IOCTL_H7_UNLOAD:
         h7_shutdown();
         return complete(irp, STATUS_SUCCESS, 0);
