@@ -52,7 +52,7 @@ void h7_build_npt(h7_npt *t)
             t->pd[i][j].write      = 1;
             t->pd[i][j].user       = 1;
             t->pd[i][j].large_page = 1;
-            t->pd[i][j].pfn        = (ULONG)(frame); /* 2MB-aligned frame number */
+            t->pd[i][j].pfn        = (ULONG)frame;
         }
     }
 }
@@ -61,15 +61,11 @@ void h7_build_msrpm(void *map)
 {
     RtlZeroMemory(map, MSRPM_SIZE);
 
-    /* intercept writes to EFER (offset 0xC0000080, that's in the second 8KB range) */
     RTL_BITMAP bm;
     RtlInitializeBitMap(&bm, (PULONG)map, MSRPM_SIZE * 8);
 
-    /* EFER is at 0xC0000080. In the MSRPM layout:
-       range 0xC0000000-0xC0001FFF starts at byte offset 0x800.
-       Each MSR gets 2 bits (read, write). */
-    ULONG efer_offset = 0x80 * 2;      /* MSR 0xC0000080 offset from range start */
-    ULONG bit_pos = (0x800 * 8) + efer_offset + 1; /* +1 = write bit */
+    // EFER is 0xC0000080: 2 bits per msr, second range starts at byte 0x800, +1 for write bit
+    ULONG bit_pos = (0x800 * 8) + (0x80 * 2) + 1;
     RtlSetBit(&bm, bit_pos);
 }
 
@@ -81,9 +77,9 @@ USHORT h7_seg_attrib(ULONG64 gdt_base, USHORT sel)
     typedef struct { USHORT lo; USHORT mid; UCHAR base_hi; UCHAR flags; UCHAR flags2; UCHAR base_top; } GDT_RAW;
     GDT_RAW *ent = (GDT_RAW *)(gdt_base + (sel & ~7));
 
-    /* AMD packs attributes as: type(4) | s(1) | dpl(2) | p(1) | avl(1) | l(1) | db(1) | g(1) */
-    USHORT lo4 = ent->flags & 0xFF;  /* type(4) s(1) dpl(2) p(1) */
-    USHORT hi4 = (ent->flags2 >> 4) & 0x0F; /* avl l db g */
+    // AMD packs attribs as low byte = flags, high nibble = flags2>>4
+    USHORT lo4 = ent->flags & 0xFF;
+    USHORT hi4 = (ent->flags2 >> 4) & 0x0F;
     return (hi4 << 8) | lo4;
 }
 
@@ -95,24 +91,14 @@ void h7_fill_vmcb(h7_vcpu *cpu, h7_guest_ctx *ctx, h7_npt *tables)
     RtlZeroMemory(ctl, sizeof(*ctl));
     RtlZeroMemory(st,  sizeof(*st));
 
-    /* intercepts */
-    ctl->intercept_misc1 |= (1u << 18);  /* cpuid */
-    ctl->intercept_misc1 |= (1u << 15);  /* msr (via msrpm) */
-    ctl->intercept_misc1 |= (1u << 14);  /* rdtsc */
-    ctl->intercept_misc2 |= (1u << 0);   /* vmrun */
-    ctl->intercept_misc2 |= (1u << 1);   /* vmmcall */
-    ctl->intercept_misc2 |= (1u << 2);   /* vmload */
-    ctl->intercept_misc2 |= (1u << 3);   /* vmsave */
-    ctl->intercept_misc2 |= (1u << 4);   /* stgi */
-    ctl->intercept_misc2 |= (1u << 5);   /* clgi */
-    ctl->intercept_misc2 |= (1u << 6);   /* skinit */
+    ctl->intercept_misc1 |= (1u << 18) | (1u << 15) | (1u << 14); // cpuid, msr, rdtsc
+    ctl->intercept_misc2 |= 0x7Fu;                                // vmrun..skinit
 
     ctl->guest_asid = 1;
     ctl->np_enable  = SVM_NP_ENABLE;
     ctl->ncr3       = MmGetPhysicalAddress(&tables->pml4[0]).QuadPart;
     ctl->msrpm_base_pa = MmGetPhysicalAddress(tables->msrpm).QuadPart;
 
-    /* guest state from snapshot */
     st->gdtr.base   = ctx->gdtr_base;
     st->gdtr.limit  = ctx->gdtr_limit;
     st->idtr.base   = ctx->idtr_base;
@@ -143,19 +129,16 @@ void h7_fill_vmcb(h7_vcpu *cpu, h7_guest_ctx *ctx, h7_npt *tables)
     st->rip    = ctx->rip;
     st->gpat   = ctx->gpat;
 
-    /* save current guest state into the vmcb phys page */
     ULONG64 gpa = MmGetPhysicalAddress(&cpu->guest_vmcb).QuadPart;
     ULONG64 hpa = MmGetPhysicalAddress(&cpu->host_vmcb).QuadPart;
     __svm_vmsave(gpa);
 
-    /* populate host stack layout so the asm loop can find things */
     cpu->top.guest_vmcb_pa = gpa;
     cpu->top.host_vmcb_pa  = hpa;
-    cpu->top.self           = cpu;
-    cpu->top.npt            = tables;
-    cpu->top.sentinel       = H7_SENTINEL;
+    cpu->top.self          = cpu;
+    cpu->top.npt           = tables;
+    cpu->top.sentinel      = H7_SENTINEL;
 
-    /* tell the cpu where to save host state */
     ULONG64 hsave_pa = MmGetPhysicalAddress(cpu->host_save_area).QuadPart;
     __writemsr(MSR_VM_HSAVE_PA, hsave_pa);
     __svm_vmsave(hpa);

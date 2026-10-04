@@ -1,267 +1,78 @@
+mod service;
+mod device;
+
 use std::env;
-use std::ffi::CString;
-use std::path::PathBuf;
-use std::ptr;
 
-use windows_sys::Win32::Foundation::*;
-use windows_sys::Win32::System::Services::*;
-
-type ScHandle = *mut core::ffi::c_void;
-
-const SVC_NAME: &str = "hv7";
-const DRIVER_FILE: &str = "hv7.sys";
-
-fn get_driver_path() -> PathBuf {
-    let exe = env::current_exe().expect("can't find exe path");
-    let dir = exe.parent().unwrap();
-    let beside = dir.join(DRIVER_FILE);
-    if beside.exists() {
-        return beside;
-    }
-    let build = dir.join("..\\..\\build").join(DRIVER_FILE);
-    if build.exists() {
-        return build.canonicalize().unwrap();
-    }
-    beside
-}
-
-fn open_scm() -> ScHandle {
-    unsafe { OpenSCManagerA(ptr::null(), ptr::null(), SC_MANAGER_ALL_ACCESS) }
-}
-
-fn install() {
-    let scm = open_scm();
-    if scm.is_null() {
-        eprintln!("failed to open SCM (run as admin)");
-        return;
-    }
-
-    let path = get_driver_path();
-    if !path.exists() {
-        eprintln!("driver not found at {}", path.display());
-        unsafe { CloseServiceHandle(scm); }
-        return;
-    }
-
-    let path_str = path.to_str().unwrap();
-    let svc_name = CString::new(SVC_NAME).unwrap();
-    let bin_path = CString::new(path_str).unwrap();
-
-    let svc = unsafe {
-        CreateServiceA(
-            scm,
-            svc_name.as_ptr() as *const u8,
-            svc_name.as_ptr() as *const u8,
-            SERVICE_ALL_ACCESS,
-            SERVICE_KERNEL_DRIVER,
-            SERVICE_DEMAND_START,
-            SERVICE_ERROR_NORMAL,
-            bin_path.as_ptr() as *const u8,
-            ptr::null(), ptr::null_mut(), ptr::null(), ptr::null(), ptr::null(),
-        )
-    };
-
-    if svc.is_null() {
-        let err = unsafe { GetLastError() };
-        if err == ERROR_SERVICE_EXISTS {
-            println!("service already exists, starting...");
-            start();
-        } else {
-            eprintln!("CreateService failed: {err}");
-        }
-        unsafe { CloseServiceHandle(scm); }
-        return;
-    }
-
-    println!("service created, starting...");
-    unsafe {
-        if StartServiceA(svc, 0, ptr::null()) == 0 {
-            let err = GetLastError();
-            if err != ERROR_SERVICE_ALREADY_RUNNING {
-                eprintln!("StartService failed: {err}");
-            }
-        } else {
-            println!("hypervisor loaded");
-        }
-        CloseServiceHandle(svc);
-        CloseServiceHandle(scm);
-    }
-}
-
-fn start() {
-    let scm = open_scm();
-    if scm.is_null() { eprintln!("SCM failed"); return; }
-
-    let name = CString::new(SVC_NAME).unwrap();
-    let svc = unsafe {
-        OpenServiceA(scm, name.as_ptr() as *const u8, SERVICE_START)
-    };
-    if svc.is_null() {
-        eprintln!("can't open service (not installed?)");
-        unsafe { CloseServiceHandle(scm); }
-        return;
-    }
-
-    unsafe {
-        if StartServiceA(svc, 0, ptr::null()) == 0 {
-            let err = GetLastError();
-            if err == ERROR_SERVICE_ALREADY_RUNNING {
-                println!("already running");
-            } else {
-                eprintln!("start failed: {err}");
-            }
-        } else {
-            println!("started");
-        }
-        CloseServiceHandle(svc);
-        CloseServiceHandle(scm);
-    }
-}
-
-fn stop_svc() {
-    let scm = open_scm();
-    if scm.is_null() { eprintln!("SCM failed"); return; }
-
-    let name = CString::new(SVC_NAME).unwrap();
-    let svc = unsafe {
-        OpenServiceA(scm, name.as_ptr() as *const u8, SERVICE_STOP)
-    };
-    if svc.is_null() {
-        eprintln!("can't open service");
-        unsafe { CloseServiceHandle(scm); }
-        return;
-    }
-
-    let mut status = SERVICE_STATUS {
-        dwServiceType: 0,
-        dwCurrentState: 0,
-        dwControlsAccepted: 0,
-        dwWin32ExitCode: 0,
-        dwServiceSpecificExitCode: 0,
-        dwCheckPoint: 0,
-        dwWaitHint: 0,
-    };
-
-    unsafe {
-        if ControlService(svc, SERVICE_CONTROL_STOP, &mut status) == 0 {
-            eprintln!("stop failed: {}", GetLastError());
-        } else {
-            println!("stopped");
-        }
-        CloseServiceHandle(svc);
-        CloseServiceHandle(scm);
-    }
-}
-
-fn remove() {
-    stop_svc();
-
-    let scm = open_scm();
-    if scm.is_null() { return; }
-
-    let name = CString::new(SVC_NAME).unwrap();
-    // DELETE = 0x00010000
-    let svc = unsafe {
-        OpenServiceA(scm, name.as_ptr() as *const u8, 0x00010000)
-    };
-    if svc.is_null() {
-        unsafe { CloseServiceHandle(scm); }
-        return;
-    }
-
-    unsafe {
-        if DeleteService(svc) == 0 {
-            eprintln!("delete failed: {}", GetLastError());
-        } else {
-            println!("service removed");
-        }
-        CloseServiceHandle(svc);
-        CloseServiceHandle(scm);
-    }
-}
-
-fn status() {
-    let scm = open_scm();
-    if scm.is_null() { eprintln!("SCM failed"); return; }
-
-    let name = CString::new(SVC_NAME).unwrap();
-    let svc = unsafe {
-        OpenServiceA(scm, name.as_ptr() as *const u8, SERVICE_QUERY_STATUS)
-    };
-    if svc.is_null() {
-        println!("service not installed");
-        unsafe { CloseServiceHandle(scm); }
-        return;
-    }
-
-    let mut st = SERVICE_STATUS {
-        dwServiceType: 0, dwCurrentState: 0, dwControlsAccepted: 0,
-        dwWin32ExitCode: 0, dwServiceSpecificExitCode: 0,
-        dwCheckPoint: 0, dwWaitHint: 0,
-    };
-
-    unsafe {
-        if QueryServiceStatus(svc, &mut st) != 0 {
-            let state = match st.dwCurrentState {
-                SERVICE_STOPPED => "stopped",
-                SERVICE_RUNNING => "running",
-                SERVICE_START_PENDING => "starting",
-                SERVICE_STOP_PENDING => "stopping",
-                _ => "unknown",
-            };
-            println!("hv7: {state}");
-        }
-        CloseServiceHandle(svc);
-        CloseServiceHandle(scm);
-    }
-}
-
-fn ping() {
+fn ping_cpuid() -> u32 {
     #[cfg(target_arch = "x86_64")]
-    {
+    unsafe {
         let ecx: u32;
-        unsafe {
-            // rbx is reserved by LLVM, so we save/restore it manually
-            std::arch::asm!(
-                "push rbx",
-                "cpuid",
-                "pop rbx",
-                in("eax") 0x40000010u32,
-                in("ecx") 0u32,
-                lateout("ecx") ecx,
-                lateout("edx") _,
-                lateout("eax") _,
-            );
-        }
-        let magic = u32::from_le_bytes(*b"Hyp7");
-        if ecx == magic {
-            println!("hypervisor is live!");
-        } else {
-            println!("hypervisor not detected (ecx={ecx:#x})");
-        }
+        std::arch::asm!(
+            "push rbx", "cpuid", "pop rbx",
+            in("eax") 0x40000010u32,
+            in("ecx") 0u32,
+            lateout("ecx") ecx,
+            lateout("edx") _,
+            lateout("eax") _,
+        );
+        return ecx;
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    0
+}
+
+fn cmd_ping() {
+    let magic = u32::from_le_bytes(*b"Hyp7");
+    let ecx = ping_cpuid();
+    if ecx == magic {
+        println!("cpuid: hypervisor live");
+    } else {
+        println!("cpuid: no hypervisor (ecx={ecx:#x})");
+        return;
     }
 
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        eprintln!("ping only works on x86_64");
+    match device::Device::open() {
+        Ok(d) => match d.ping() {
+            Ok(v) => println!("ioctl: hypercall returned {v:#x}"),
+            Err(e) => eprintln!("ioctl ping failed: {e}"),
+        },
+        Err(e) => eprintln!("open device: {e} (service running?)"),
     }
+}
+
+fn cmd_stats() {
+    let d = match device::Device::open() {
+        Ok(d) => d,
+        Err(e) => { eprintln!("open: {e}"); return; }
+    };
+    let s = match d.stats() {
+        Ok(s) => s,
+        Err(e) => { eprintln!("stats: {e}"); return; }
+    };
+    println!("vmexit stats:");
+    println!("  total       {}", s.total);
+    println!("  cpuid       {}", s.cpuid);
+    println!("  msr         {}", s.msr);
+    println!("  rdtsc       {}", s.rdtsc);
+    println!("  vmmcall     {}", s.vmmcall);
+    println!("  injected #UD {}", s.injected_ud);
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
-        println!("usage: hv-ctl <install|start|stop|remove|status|ping>");
+        println!("usage: hv-ctl <install|start|stop|remove|status|ping|stats>");
         return;
     }
-
     match args[1].as_str() {
-        "install" => install(),
-        "start"   => start(),
-        "stop"    => stop_svc(),
-        "remove"  => remove(),
-        "status"  => status(),
-        "ping"    => ping(),
-        other     => eprintln!("unknown command: {other}"),
+        "install" => service::install(),
+        "start"   => service::start(),
+        "stop"    => service::stop(),
+        "remove"  => service::remove(),
+        "status"  => service::status(),
+        "ping"    => cmd_ping(),
+        "stats"   => cmd_stats(),
+        other     => eprintln!("unknown: {other}"),
     }
 }
 
@@ -270,28 +81,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn driver_path_returns_something() {
-        let p = get_driver_path();
-        assert!(p.file_name().unwrap() == DRIVER_FILE);
-    }
-
-    #[test]
     fn ping_magic_encoding() {
-        // make sure our cpuid magic matches what the driver puts in ecx
-        let magic = u32::from_le_bytes(*b"Hyp7");
-        assert_eq!(magic, 0x37707948);
+        assert_eq!(u32::from_le_bytes(*b"Hyp7"), 0x37707948);
     }
 
     #[test]
-    fn unknown_command_doesnt_panic() {
-        // just make sure the match arm doesn't blow up
-        // (we can't easily capture stderr here, just checking no panic)
-        let _ = std::panic::catch_unwind(|| {
-            // simulate: we won't actually call main, just the match
-            match "garbage" {
-                "install" | "start" | "stop" | "remove" | "status" | "ping" => {},
-                _other => {},
-            }
-        });
+    fn ioctl_codes_match_driver() {
+        // mirrors h7_abi.h: CTL_CODE(FILE_DEVICE_UNKNOWN=0x22, fn, METHOD_BUFFERED=0, 0)
+        assert_eq!(device::IOCTL_PING,   (0x22 << 16) | (0x800 << 2));
+        assert_eq!(device::IOCTL_STATS,  (0x22 << 16) | (0x801 << 2));
+        assert_eq!(device::IOCTL_UNLOAD, (0x22 << 16) | (0x802 << 2));
+    }
+
+    #[test]
+    fn stats_struct_matches_c_layout() {
+        // 6 u64s, matches h7_stats_out
+        assert_eq!(std::mem::size_of::<device::Stats>(), 48);
     }
 }

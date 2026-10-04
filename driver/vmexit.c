@@ -2,18 +2,13 @@
 
 #pragma intrinsic(__rdtsc, __readmsr, __writemsr, __cpuidex)
 
+static h7_stats g_stats = {0};
+
+h7_stats *h7_get_stats(void) { return &g_stats; }
+
 static void inject_ud(h7_vcpu *cpu)
 {
-    /* type=3 (hw exception), vector=6 (#UD), valid=1 */
-    cpu->guest_vmcb.control.event_inject =
-        (1ULL << 31) | (3ULL << 8) | 6;
-}
-
-static void inject_gp(h7_vcpu *cpu)
-{
-    /* type=3, vector=13 (#GP), valid=1, error_code_valid=1, error=0 */
-    cpu->guest_vmcb.control.event_inject =
-        (1ULL << 31) | (1ULL << 11) | (3ULL << 8) | 13;
+    cpu->guest_vmcb.control.event_inject = (1ULL << 31) | (3ULL << 8) | 6;
 }
 
 static void on_cpuid(h7_vcpu *cpu, h7_exit_ctx *ectx)
@@ -29,10 +24,10 @@ static void on_cpuid(h7_vcpu *cpu, h7_exit_ctx *ectx)
         regs[2] |= FEAT_ECX_HYPERVISOR;
         break;
     case CPUID_HV_VENDOR:
-        regs[0] = CPUID_HV_INTERFACE; /* max leaf */
-        regs[1] = 'pyH';   /* "Hyp" */
-        regs[2] = '7re';   /* "er7" */
-        regs[3] = 'osiV';  /* "Viso" */
+        regs[0] = CPUID_HV_INTERFACE;
+        regs[1] = 'pyH';
+        regs[2] = '7re';
+        regs[3] = 'osiV';
         break;
     case CPUID_HV_INTERFACE:
         regs[0] = '0#vH';
@@ -43,8 +38,9 @@ static void on_cpuid(h7_vcpu *cpu, h7_exit_ctx *ectx)
         break;
     case CPUID_HV_UNLOAD:
         if (sub == CPUID_HV_UNLOAD) {
+            // only let ring 0 request devirt
             USHORT dpl = cpu->guest_vmcb.save.ss.attrib & 0x60;
-            if (dpl == 0) /* ring 0 only */
+            if (dpl == 0)
                 ectx->wants_off = TRUE;
         }
         break;
@@ -69,7 +65,7 @@ static void on_msr(h7_vcpu *cpu, h7_exit_ctx *ectx)
         v.HighPart = (ULONG)(ectx->gprs->rdx & 0xFFFFFFFF);
 
         if (msr == MSR_EFER) {
-            /* never let guest clear SVME while we're live */
+            // guest can't clear SVME while we're running on top of it
             v.QuadPart |= EFER_SVME;
             cpu->guest_vmcb.save.efer = v.QuadPart;
         }
@@ -85,60 +81,93 @@ static void on_msr(h7_vcpu *cpu, h7_exit_ctx *ectx)
 
 static void on_rdtsc(h7_vcpu *cpu, h7_exit_ctx *ectx)
 {
-    ULONG64 tsc = __rdtsc();
-    ectx->gprs->rax = (ULONG)(tsc);
+    ULONG64 tsc = __rdtsc() + cpu->tsc_offset;
+    ectx->gprs->rax = (ULONG)tsc;
     ectx->gprs->rdx = (ULONG)(tsc >> 32);
     cpu->guest_vmcb.save.rip = cpu->guest_vmcb.control.nrip;
 }
 
+static ULONG64 do_hypercall(h7_vcpu *cpu, h7_gp_regs *gprs)
+{
+    ULONG64 num = gprs->rax;
+    ULONG64 a1  = gprs->rcx;
+    ULONG64 a2  = gprs->rdx;
+    ULONG64 a3  = gprs->r8;
+
+    switch (num) {
+    case HC_PING:
+        return CPUID_PING_MAGIC;
+
+    case HC_GET_STATS:
+        return (ULONG64)&g_stats;
+
+    case HC_GET_CPU:
+        return (ULONG64)cpu;
+
+    case HC_SET_TSC_OFFSET:
+        cpu->tsc_offset = a1;
+        return 0;
+
+    case HC_READ_PHYS: {
+        PHYSICAL_ADDRESS pa; pa.QuadPart = a1;
+        void *va = MmGetVirtualForPhysical(pa);
+        if (!va) return (ULONG64)-1;
+        return *(ULONG64 *)va;
+    }
+
+    default:
+        return (ULONG64)-1;
+    }
+}
+
 static void on_vmmcall(h7_vcpu *cpu, h7_exit_ctx *ectx)
 {
-    UNREFERENCED_PARAMETER(ectx);
+    // only trust ring 0 callers
+    USHORT dpl = cpu->guest_vmcb.save.ss.attrib & 0x60;
+    if (dpl != 0) {
+        inject_ud(cpu);
+        return;
+    }
+
+    ectx->gprs->rax = do_hypercall(cpu, ectx->gprs);
     cpu->guest_vmcb.save.rip = cpu->guest_vmcb.control.nrip;
 }
 
+static void bump(volatile LONG64 *counter) { InterlockedIncrement64(counter); }
+
 BOOLEAN __stdcall h7_handle_exit(h7_vcpu *cpu, h7_gp_regs *gprs)
 {
-    h7_exit_ctx ectx;
-    ectx.gprs      = gprs;
-    ectx.wants_off = FALSE;
+    h7_exit_ctx ectx = { .gprs = gprs, .wants_off = FALSE };
 
     __svm_vmload(cpu->top.host_vmcb_pa);
     gprs->rax = cpu->guest_vmcb.save.rax;
 
-    switch (cpu->guest_vmcb.control.exit_code) {
-    case VMEXIT_CPUID:
-        on_cpuid(cpu, &ectx);
-        break;
-    case VMEXIT_MSR:
-        on_msr(cpu, &ectx);
-        break;
+    ULONG64 code = cpu->guest_vmcb.control.exit_code;
+    bump(&g_stats.total);
+
+    switch (code) {
+    case VMEXIT_CPUID:   bump(&g_stats.cpuid);   on_cpuid(cpu, &ectx); break;
+    case VMEXIT_MSR:     bump(&g_stats.msr);     on_msr(cpu, &ectx); break;
+    case VMEXIT_RDTSC:   bump(&g_stats.rdtsc);   on_rdtsc(cpu, &ectx); break;
+    case VMEXIT_VMMCALL: bump(&g_stats.vmmcall); on_vmmcall(cpu, &ectx); break;
+
     case VMEXIT_VMRUN:
     case VMEXIT_VMLOAD:
     case VMEXIT_VMSAVE:
     case VMEXIT_CLGI:
     case VMEXIT_STGI:
     case VMEXIT_SKINIT:
+        bump(&g_stats.injected_ud);
         inject_ud(cpu);
         break;
-    case VMEXIT_VMMCALL:
-        on_vmmcall(cpu, &ectx);
-        break;
-    case VMEXIT_RDTSC:
-        on_rdtsc(cpu, &ectx);
-        break;
+
     default:
-        H7_LOG("unhandled exit 0x%llx at rip %llx",
-               cpu->guest_vmcb.control.exit_code,
-               cpu->guest_vmcb.save.rip);
-        KeBugCheckEx(0xDEAD7777UL,
-                     cpu->guest_vmcb.save.rip,
-                     cpu->guest_vmcb.control.exit_code, 0, 0);
-        break;
+        H7_LOG("unhandled exit 0x%llx rip=%llx", code, cpu->guest_vmcb.save.rip);
+        KeBugCheckEx(0xDEAD7777UL, cpu->guest_vmcb.save.rip, code, 0, 0);
     }
 
     if (ectx.wants_off) {
-        /* set up for the asm bail-out path */
+        // asm bail-out expects: eax/edx = &cpu split, rbx = nrip, rcx = guest rsp
         gprs->rax = (ULONG64)cpu & 0xFFFFFFFF;
         gprs->rbx = cpu->guest_vmcb.control.nrip;
         gprs->rcx = cpu->guest_vmcb.save.rsp;

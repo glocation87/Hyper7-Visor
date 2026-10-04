@@ -21,6 +21,8 @@ if errorlevel 1 goto fail
 if errorlevel 1 goto fail
 "%CC%" %CFLAGS% %INCS% /c driver\vmexit.c  /Fobuild\vmexit.obj  /Fdbuild\vc.pdb
 if errorlevel 1 goto fail
+"%CC%" %CFLAGS% %INCS% /c driver\io.c      /Fobuild\io.obj      /Fdbuild\vc.pdb
+if errorlevel 1 goto fail
 
 echo [*] assembling...
 "%AS%" /nologo /c /Cx /Fobuild\vmloop.obj driver\vmloop.asm
@@ -31,7 +33,7 @@ echo [*] linking...
     /OUT:build\hv7.sys /PDB:build\hv7.pdb ^
     /LIBPATH:"%WDK_LIB%\km\x64" ^
     /LIBPATH:"%MSVC_ROOT%\lib\x64" ^
-    build\entry.obj build\svm.obj build\vmexit.obj build\vmloop.obj ^
+    build\entry.obj build\svm.obj build\vmexit.obj build\io.obj build\vmloop.obj ^
     ntoskrnl.lib hal.lib wmilib.lib BufferOverflowK.lib
 if errorlevel 1 goto fail
 

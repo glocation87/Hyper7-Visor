@@ -2,9 +2,6 @@
 
 static h7_npt *g_npt = NULL;
 
-/* ------------------------------------------------------------------ */
-/*  capture guest context right before we hand off to vmrun           */
-/* ------------------------------------------------------------------ */
 static void h7_snapshot_guest(h7_guest_ctx *out)
 {
     RtlZeroMemory(out, sizeof(*out));
@@ -34,9 +31,6 @@ static void h7_snapshot_guest(h7_guest_ctx *out)
     out->rip    = h7_read_rip();
 }
 
-/* ------------------------------------------------------------------ */
-/*  check if we're already running (cpuid probe)                      */
-/* ------------------------------------------------------------------ */
 static BOOLEAN h7_already_live(void)
 {
     int regs[4] = {0};
@@ -44,32 +38,27 @@ static BOOLEAN h7_already_live(void)
     return regs[2] == CPUID_PING_MAGIC;
 }
 
-/* ------------------------------------------------------------------ */
-/*  per-cpu virtualize / devirtualize                                 */
-/* ------------------------------------------------------------------ */
 static NTSTATUS h7_virtualize_cpu(void *ctx)
 {
     h7_npt *tables = (h7_npt *)ctx;
 
-    /* enable SVM in EFER if it isn't already */
     ULONG64 vmcr = __readmsr(MSR_VM_CR);
-    if (vmcr & VM_CR_SVMDIS) {
+    if (vmcr & VM_CR_SVMDIS)
         __writemsr(MSR_VM_CR, vmcr & ~VM_CR_SVMDIS);
-    }
+
     ULONG64 efer = __readmsr(MSR_EFER);
     if (!(efer & EFER_SVME))
         __writemsr(MSR_EFER, efer | EFER_SVME);
 
-    h7_vcpu *cpu = (h7_vcpu *)ExAllocatePool2(
-        POOL_FLAG_NON_PAGED, sizeof(h7_vcpu), 'h7vc');
+    h7_vcpu *cpu = ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(h7_vcpu), 'h7vc');
     if (!cpu) return STATUS_NO_MEMORY;
     RtlZeroMemory(cpu, sizeof(*cpu));
 
     h7_guest_ctx snap;
     h7_snapshot_guest(&snap);
 
+    // CAPTURE_GUEST returns twice: first via snapshot, second after vmrun
     if (h7_already_live()) {
-        /* we came back from vmrun — means we're virtualized */
         H7_LOG("cpu %u virtualized", KeGetCurrentProcessorNumberEx(NULL));
         return STATUS_SUCCESS;
     }
@@ -77,7 +66,6 @@ static NTSTATUS h7_virtualize_cpu(void *ctx)
     h7_fill_vmcb(cpu, &snap, tables);
     h7_launch_vm((ULONG64)&cpu->top.guest_vmcb_pa);
 
-    /* should never get here */
     KeBugCheck(MANUALLY_INITIATED_CRASH);
     return STATUS_UNSUCCESSFUL;
 }
@@ -88,12 +76,10 @@ static NTSTATUS h7_devirt_cpu(void *ctx)
     int regs[4];
     __cpuidex(regs, CPUID_HV_UNLOAD, CPUID_HV_UNLOAD);
 
-    if (regs[2] != CPUID_PING_MAGIC) {
-        /* wasn't virtualized? nothing to do */
+    if (regs[2] != CPUID_PING_MAGIC)
         return STATUS_SUCCESS;
-    }
 
-    /* reconstruct vcpu pointer from split halves */
+    // vcpu pointer split across eax/edx by the exit handler
     ULONG64 hi = (ULONG64)(ULONG)regs[3];
     ULONG64 lo = (ULONG64)(ULONG)regs[0];
     h7_vcpu *cpu = (h7_vcpu *)(hi << 32 | lo);
@@ -103,9 +89,6 @@ static NTSTATUS h7_devirt_cpu(void *ctx)
     return STATUS_SUCCESS;
 }
 
-/* ------------------------------------------------------------------ */
-/*  DPC machinery to run something on every cpu                       */
-/* ------------------------------------------------------------------ */
 typedef NTSTATUS (*h7_percpu_fn)(void *ctx);
 
 typedef struct _h7_dpc_ctx {
@@ -117,8 +100,7 @@ typedef struct _h7_dpc_ctx {
     LONG         total;
 } h7_dpc_ctx;
 
-static void h7_dpc_routine(
-    PKDPC dpc, void *deferred, void *sa1, void *sa2)
+static void h7_dpc_routine(PKDPC dpc, void *deferred, void *sa1, void *sa2)
 {
     UNREFERENCED_PARAMETER(dpc);
     h7_dpc_ctx *dc = (h7_dpc_ctx *)deferred;
@@ -140,16 +122,14 @@ static NTSTATUS h7_run_on_all_cpus(h7_percpu_fn fn, void *arg)
     ULONG count = KeQueryActiveProcessorCountEx(ALL_PROCESSOR_GROUPS);
 
     h7_dpc_ctx dc;
-    dc.fn   = fn;
-    dc.arg  = arg;
-    dc.done = 0;
+    dc.fn    = fn;
+    dc.arg   = arg;
+    dc.done  = 0;
     dc.total = (LONG)count;
-    dc.results = (NTSTATUS *)ExAllocatePool2(
-        POOL_FLAG_NON_PAGED, count * sizeof(NTSTATUS), 'h7dp');
+    dc.results = ExAllocatePool2(POOL_FLAG_NON_PAGED, count * sizeof(NTSTATUS), 'h7dp');
     if (!dc.results) return STATUS_NO_MEMORY;
     KeInitializeEvent(&dc.ev, NotificationEvent, FALSE);
 
-    H7_LOG("broadcasting to %u cpus", count);
     KeGenericCallDpc(h7_dpc_routine, &dc);
     KeWaitForSingleObject(&dc.ev, Executive, KernelMode, FALSE, NULL);
 
@@ -164,13 +144,9 @@ static NTSTATUS h7_run_on_all_cpus(h7_percpu_fn fn, void *arg)
     return final;
 }
 
-/* ------------------------------------------------------------------ */
-/*  go live / shutdown                                                */
-/* ------------------------------------------------------------------ */
 NTSTATUS h7_go_live(h7_npt **out_npt)
 {
-    h7_npt *t = (h7_npt *)ExAllocatePool2(
-        POOL_FLAG_NON_PAGED, sizeof(h7_npt), 'h7np');
+    h7_npt *t = ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(h7_npt), 'h7np');
     if (!t) return STATUS_NO_MEMORY;
     RtlZeroMemory(t, sizeof(*t));
 
@@ -178,8 +154,7 @@ NTSTATUS h7_go_live(h7_npt **out_npt)
 
     PHYSICAL_ADDRESS lo = {0}, hi = {0};
     hi.QuadPart = -1LL;
-    t->msrpm = MmAllocateContiguousMemorySpecifyCache(
-        MSRPM_SIZE, lo, hi, lo, MmCached);
+    t->msrpm = MmAllocateContiguousMemorySpecifyCache(MSRPM_SIZE, lo, hi, lo, MmCached);
     if (!t->msrpm) {
         ExFreePoolWithTag(t, 'h7np');
         return STATUS_NO_MEMORY;
@@ -194,7 +169,6 @@ NTSTATUS h7_go_live(h7_npt **out_npt)
     }
 
     *out_npt = t;
-    H7_LOG("all cpus virtualized");
     return STATUS_SUCCESS;
 }
 
@@ -211,14 +185,16 @@ NTSTATUS h7_shutdown(void)
     return st;
 }
 
-/* ------------------------------------------------------------------ */
-/*  driver entry / unload                                             */
-/* ------------------------------------------------------------------ */
+h7_npt *h7_get_npt(void)
+{
+    return g_npt;
+}
+
 static void h7_unload(PDRIVER_OBJECT drv)
 {
-    UNREFERENCED_PARAMETER(drv);
+    h7_io_cleanup(drv);
     h7_shutdown();
-    H7_LOG("driver unloaded");
+    H7_LOG("unloaded");
 }
 
 NTSTATUS DriverEntry(PDRIVER_OBJECT drv, PUNICODE_STRING reg)
@@ -237,10 +213,17 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT drv, PUNICODE_STRING reg)
 
     st = h7_go_live(&g_npt);
     if (!NT_SUCCESS(st)) {
-        H7_LOG("failed to go live (0x%08X)", st);
+        H7_LOG("go_live failed (0x%08X)", st);
         return st;
     }
 
-    H7_LOG("hypervisor running");
+    st = h7_io_init(drv);
+    if (!NT_SUCCESS(st)) {
+        H7_LOG("io init failed (0x%08X)", st);
+        h7_shutdown();
+        return st;
+    }
+
+    H7_LOG("running");
     return STATUS_SUCCESS;
 }

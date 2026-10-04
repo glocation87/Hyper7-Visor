@@ -130,4 +130,15 @@ h7_sgdt proc
     ret
 h7_sgdt endp
 
+; ULONG64 h7_hypercall(num, a1, a2, a3)
+;   num -> rax, args stay in rcx/rdx/r8 (vmmcall ABI)
+h7_hypercall proc
+    mov     rax, rcx
+    mov     rcx, rdx
+    mov     rdx, r8
+    mov     r8,  r9
+    vmmcall
+    ret
+h7_hypercall endp
+
 end
