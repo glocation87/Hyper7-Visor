@@ -1,5 +1,7 @@
 #pragma once
+#ifndef H7_USERMODE_TEST
 #include <ntddk.h>
+#endif
 
 #pragma pack(push, 1)
 

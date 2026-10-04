@@ -1,6 +1,6 @@
-# Hyper7
+# Hyper7 
 
-A small AMD-V (SVM) hypervisor for research/learning. It virtualizes the
+A small AMD-V (SVM) hypervisor written in Rust/C. It virtualizes the
 machine it's already running on ("blue pill" style), the same approach as
 SimpleSvm and jonomango's hv.
 
@@ -14,7 +14,7 @@ Two pieces:
   probe, unload).
 
 Not stealthy on purpose. CPUID leaf `0x40000000` reports the vendor
-`Hyper7Visor ` so you can tell it's live.
+`Hyper7Visor ` so you can tell it's live, i might change soon
 
 ## Building
 
@@ -28,7 +28,7 @@ Controller:
 
 ## Running
 
-Kernel code has to be signed, so either boot with test signing on
+driver has to be signed, so either boot with test signing on
 (`bcdedit /set testsigning on`, reboot) and sign the `.sys`, or load it under
 a kernel debugger. SVM also has to be enabled in BIOS, and Hyper-V/VBS off (it
 grabs SVM first otherwise).

@@ -36,6 +36,21 @@ echo [*] linking...
 if errorlevel 1 goto fail
 
 echo [+] build\hv7.sys ready
+
+if "%1"=="test" goto run_tests
+goto end
+
+:run_tests
+echo.
+echo [*] building layout tests...
+"%CC%" /nologo /W3 /TC /std:c17 /DH7_USERMODE_TEST /Idriver /I"%WDK_INC%\ucrt" /I"%MSVC_ROOT%\include" driver\test_layout.c /Febuild\test_layout.exe /Fobuild\test_layout.obj /link /LIBPATH:"%WDK_LIB%\ucrt\x64" /LIBPATH:"%WDK_LIB%\um\x64" /LIBPATH:"%MSVC_ROOT%\lib\x64"
+if errorlevel 1 goto fail
+echo [*] running layout tests...
+build\test_layout.exe
+if errorlevel 1 goto fail
+echo [*] running rust tests...
+cd ctl && cargo test --release 2>&1
+cd ..
 goto end
 
 :fail

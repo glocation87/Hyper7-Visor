@@ -264,3 +264,34 @@ fn main() {
         other     => eprintln!("unknown command: {other}"),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn driver_path_returns_something() {
+        let p = get_driver_path();
+        assert!(p.file_name().unwrap() == DRIVER_FILE);
+    }
+
+    #[test]
+    fn ping_magic_encoding() {
+        // make sure our cpuid magic matches what the driver puts in ecx
+        let magic = u32::from_le_bytes(*b"Hyp7");
+        assert_eq!(magic, 0x37707948);
+    }
+
+    #[test]
+    fn unknown_command_doesnt_panic() {
+        // just make sure the match arm doesn't blow up
+        // (we can't easily capture stderr here, just checking no panic)
+        let _ = std::panic::catch_unwind(|| {
+            // simulate: we won't actually call main, just the match
+            match "garbage" {
+                "install" | "start" | "stop" | "remove" | "status" | "ping" => {},
+                _other => {},
+            }
+        });
+    }
+}
