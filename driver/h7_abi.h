@@ -6,6 +6,8 @@
 #define HC_GET_CPU          0x7703
 #define HC_SET_TSC_OFFSET   0x7704
 #define HC_READ_PHYS        0x7705
+#define HC_CR3_WATCH        0x7706
+#define HC_CR3_SAMPLE       0x7707
 
 // device + ioctls
 #define H7_DEVICE_NAME_W    L"\\Device\\hv7"
@@ -24,12 +26,17 @@
 #define IOCTL_H7_PING       CTL_CODE(FILE_DEVICE_UNKNOWN, 0x800, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define IOCTL_H7_STATS      CTL_CODE(FILE_DEVICE_UNKNOWN, 0x801, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define IOCTL_H7_UNLOAD     CTL_CODE(FILE_DEVICE_UNKNOWN, 0x802, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_H7_CR3_WATCH  CTL_CODE(FILE_DEVICE_UNKNOWN, 0x803, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_H7_CR3_SAMPLE CTL_CODE(FILE_DEVICE_UNKNOWN, 0x804, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
 typedef struct _h7_stats_out {
     unsigned __int64 total;
     unsigned __int64 cpuid;
     unsigned __int64 msr;
     unsigned __int64 rdtsc;
+    unsigned __int64 rdtscp;
     unsigned __int64 vmmcall;
+    unsigned __int64 cr3_write;
+    unsigned __int64 npf;
     unsigned __int64 injected_ud;
 } h7_stats_out;

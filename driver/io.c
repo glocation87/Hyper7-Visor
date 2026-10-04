@@ -42,9 +42,29 @@ static NTSTATUS on_ioctl(PDEVICE_OBJECT dev, PIRP irp)
         o->cpuid       = s->cpuid;
         o->msr         = s->msr;
         o->rdtsc       = s->rdtsc;
+        o->rdtscp      = s->rdtscp;
         o->vmmcall     = s->vmmcall;
+        o->cr3_write   = s->cr3_write;
+        o->npf         = s->npf;
         o->injected_ud = s->injected_ud;
         return complete(irp, STATUS_SUCCESS, sizeof(h7_stats_out));
+    }
+
+    case IOCTL_H7_CR3_WATCH: {
+        ULONG in_len = sp->Parameters.DeviceIoControl.InputBufferLength;
+        if (in_len < sizeof(ULONG))
+            return complete(irp, STATUS_BUFFER_TOO_SMALL, 0);
+        h7_hypercall(HC_CR3_WATCH, *(ULONG *)buf, 0, 0);
+        return complete(irp, STATUS_SUCCESS, 0);
+    }
+
+    case IOCTL_H7_CR3_SAMPLE: {
+        if (out_len < sizeof(ULONG64))
+            return complete(irp, STATUS_BUFFER_TOO_SMALL, 0);
+        ULONG64 cr3 = 0;
+        h7_hypercall(HC_CR3_SAMPLE, (ULONG64)&cr3, 0, 0);
+        *(ULONG64 *)buf = cr3;
+        return complete(irp, STATUS_SUCCESS, sizeof(ULONG64));
     }
 
     case IOCTL_H7_UNLOAD:

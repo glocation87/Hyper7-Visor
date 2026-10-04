@@ -12,10 +12,12 @@ const fn ctl_code(dev: u32, fun: u32, m: u32, acc: u32) -> u32 {
     (dev << 16) | (acc << 14) | (fun << 2) | m
 }
 
-pub const IOCTL_PING:   u32 = ctl_code(FILE_DEVICE_UNKNOWN, 0x800, METHOD_BUFFERED, 0);
-pub const IOCTL_STATS:  u32 = ctl_code(FILE_DEVICE_UNKNOWN, 0x801, METHOD_BUFFERED, 0);
+pub const IOCTL_PING:       u32 = ctl_code(FILE_DEVICE_UNKNOWN, 0x800, METHOD_BUFFERED, 0);
+pub const IOCTL_STATS:      u32 = ctl_code(FILE_DEVICE_UNKNOWN, 0x801, METHOD_BUFFERED, 0);
 #[allow(dead_code)]
-pub const IOCTL_UNLOAD: u32 = ctl_code(FILE_DEVICE_UNKNOWN, 0x802, METHOD_BUFFERED, 0);
+pub const IOCTL_UNLOAD:     u32 = ctl_code(FILE_DEVICE_UNKNOWN, 0x802, METHOD_BUFFERED, 0);
+pub const IOCTL_CR3_WATCH:  u32 = ctl_code(FILE_DEVICE_UNKNOWN, 0x803, METHOD_BUFFERED, 0);
+pub const IOCTL_CR3_SAMPLE: u32 = ctl_code(FILE_DEVICE_UNKNOWN, 0x804, METHOD_BUFFERED, 0);
 
 #[repr(C)]
 #[derive(Default, Debug)]
@@ -24,7 +26,10 @@ pub struct Stats {
     pub cpuid: u64,
     pub msr: u64,
     pub rdtsc: u64,
+    pub rdtscp: u64,
     pub vmmcall: u64,
+    pub cr3_write: u64,
+    pub npf: u64,
     pub injected_ud: u64,
 }
 
@@ -81,6 +86,22 @@ impl Device {
     pub fn stats(&self) -> Result<Stats, u32> { self.ioctl::<Stats>(IOCTL_STATS) }
     #[allow(dead_code)]
     pub fn unload(&self) -> Result<(), u32>   { self.ioctl_void(IOCTL_UNLOAD) }
+
+    pub fn cr3_watch(&self, on: bool) -> Result<(), u32> {
+        let v: u32 = if on { 1 } else { 0 };
+        let mut returned = 0u32;
+        let ok = unsafe {
+            DeviceIoControl(
+                self.0, IOCTL_CR3_WATCH,
+                &v as *const _ as *mut _, 4,
+                ptr::null_mut(), 0,
+                &mut returned, ptr::null_mut(),
+            )
+        };
+        if ok == 0 { Err(unsafe { GetLastError() }) } else { Ok(()) }
+    }
+
+    pub fn cr3_sample(&self) -> Result<u64, u32> { self.ioctl::<u64>(IOCTL_CR3_SAMPLE) }
 }
 
 impl Drop for Device {

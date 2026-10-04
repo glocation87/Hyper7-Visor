@@ -19,6 +19,7 @@ typedef unsigned __int64 ULONG64;
 #define static_assert _Static_assert
 
 #include "vmcb.h"
+#include "h7_abi.h"
 
 static int fails = 0;
 
@@ -135,12 +136,23 @@ void test_seg_size(void)
     CHECK(h7_seg, base,     8);
 }
 
+void test_stats_abi(void)
+{
+    printf("-- h7_stats_out --\n");
+    CHECK_SIZE(h7_stats_out, 9 * 8);
+    CHECK(h7_stats_out, total,       0);
+    CHECK(h7_stats_out, cpuid,       8);
+    CHECK(h7_stats_out, npf,         56);
+    CHECK(h7_stats_out, injected_ud, 64);
+}
+
 int main(void)
 {
     test_seg_size();
     test_vmcb_control();
     test_vmcb_save();
     test_vmcb_overall();
+    test_stats_abi();
 
     if (fails == 0)
         printf("\nall layout checks passed\n");

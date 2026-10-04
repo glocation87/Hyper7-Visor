@@ -31,7 +31,8 @@
 #define EXT_EDX_LONG_MODE           (1 << 29)
 #define SVM_EDX_NP                  (1 << 0)
 
-/* vmexit codes — AMD Vol.2 Appendix C */
+// vmexit codes - AMD Vol.2 Appendix C
+#define VMEXIT_CR3_WRITE    0x13
 #define VMEXIT_CPUID        0x72
 #define VMEXIT_RDTSC        0x6E
 #define VMEXIT_RDTSCP       0x87
@@ -43,7 +44,7 @@
 #define VMEXIT_STGI         0x84
 #define VMEXIT_CLGI         0x85
 #define VMEXIT_SKINIT       0x86
-#define VMEXIT_XSETBV       0x89
+#define VMEXIT_XSETBV       0x8D
 #define VMEXIT_SHUTDOWN     0x7F
 #define VMEXIT_NPF          0x400
 #define VMEXIT_INVALID      (-1LL)

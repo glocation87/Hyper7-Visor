@@ -55,6 +55,9 @@ typedef struct _h7_stats {
     volatile LONG64 cpuid;
     volatile LONG64 msr;
     volatile LONG64 rdtsc;
+    volatile LONG64 rdtscp;
     volatile LONG64 vmmcall;
+    volatile LONG64 cr3_write;
+    volatile LONG64 npf;
     volatile LONG64 injected_ud;
 } h7_stats;

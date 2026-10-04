@@ -91,8 +91,10 @@ void h7_fill_vmcb(h7_vcpu *cpu, h7_guest_ctx *ctx, h7_npt *tables)
     RtlZeroMemory(ctl, sizeof(*ctl));
     RtlZeroMemory(st,  sizeof(*st));
 
-    ctl->intercept_misc1 |= (1u << 18) | (1u << 15) | (1u << 14); // cpuid, msr, rdtsc
-    ctl->intercept_misc2 |= 0x7Fu;                                // vmrun..skinit
+    ctl->intercept_cr_write |= (1u << 3);                             // CR3 write
+    ctl->intercept_misc1    |= (1u << 18) | (1u << 15) | (1u << 14);  // cpuid, msr, rdtsc
+    ctl->intercept_misc2    |= 0x7Fu;                                 // vmrun..skinit
+    ctl->intercept_misc2    |= (1u << 7);                             // rdtscp
 
     ctl->guest_asid = 1;
     ctl->np_enable  = SVM_NP_ENABLE;

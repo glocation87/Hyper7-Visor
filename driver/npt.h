@@ -22,7 +22,7 @@ typedef struct _h7_pml4e {
     };
 } h7_pml4e;
 
-typedef h7_pml4e h7_pdpe; /* same layout for pointer entries */
+typedef h7_pml4e h7_pdpe;
 
 typedef struct _h7_pde_2mb {
     union {
@@ -47,7 +47,6 @@ typedef struct _h7_pde_2mb {
     };
 } h7_pde_2mb;
 
-/* shared across all vcpus: the identity-mapped nested page tables + msr bitmap */
 typedef struct _h7_npt {
     void *msrpm;
     DECLSPEC_ALIGN(PAGE_SIZE) h7_pml4e   pml4[NPT_TABLE_ENTRIES];

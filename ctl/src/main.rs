@@ -50,18 +50,39 @@ fn cmd_stats() {
         Err(e) => { eprintln!("stats: {e}"); return; }
     };
     println!("vmexit stats:");
-    println!("  total       {}", s.total);
-    println!("  cpuid       {}", s.cpuid);
-    println!("  msr         {}", s.msr);
-    println!("  rdtsc       {}", s.rdtsc);
-    println!("  vmmcall     {}", s.vmmcall);
+    println!("  total        {}", s.total);
+    println!("  cpuid        {}", s.cpuid);
+    println!("  msr          {}", s.msr);
+    println!("  rdtsc        {}", s.rdtsc);
+    println!("  rdtscp       {}", s.rdtscp);
+    println!("  vmmcall      {}", s.vmmcall);
+    println!("  cr3 write    {}", s.cr3_write);
+    println!("  npf          {}", s.npf);
     println!("  injected #UD {}", s.injected_ud);
+}
+
+fn cmd_cr3(args: &[String]) {
+    let d = match device::Device::open() {
+        Ok(d) => d,
+        Err(e) => { eprintln!("open: {e}"); return; }
+    };
+    let sub = args.get(2).map(String::as_str).unwrap_or("sample");
+    match sub {
+        "on"  => { d.cr3_watch(true).ok(); println!("cr3 watch enabled"); }
+        "off" => { d.cr3_watch(false).ok(); println!("cr3 watch disabled"); }
+        "sample" => match d.cr3_sample() {
+            Ok(0)   => println!("no cr3 samples yet (enable with: hv-ctl cr3 on)"),
+            Ok(cr3) => println!("last cr3: {cr3:#x}"),
+            Err(e)  => eprintln!("sample: {e}"),
+        },
+        _ => eprintln!("usage: hv-ctl cr3 <on|off|sample>"),
+    }
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
-        println!("usage: hv-ctl <install|start|stop|remove|status|ping|stats>");
+        println!("usage: hv-ctl <install|start|stop|remove|status|ping|stats|cr3>");
         return;
     }
     match args[1].as_str() {
@@ -72,6 +93,7 @@ fn main() {
         "status"  => service::status(),
         "ping"    => cmd_ping(),
         "stats"   => cmd_stats(),
+        "cr3"     => cmd_cr3(&args),
         other     => eprintln!("unknown: {other}"),
     }
 }
@@ -95,7 +117,7 @@ mod tests {
 
     #[test]
     fn stats_struct_matches_c_layout() {
-        // 6 u64s, matches h7_stats_out
-        assert_eq!(std::mem::size_of::<device::Stats>(), 48);
+        // 9 u64s, matches h7_stats_out
+        assert_eq!(std::mem::size_of::<device::Stats>(), 72);
     }
 }

@@ -1,10 +1,14 @@
 #include "hv7.h"
 
-#pragma intrinsic(__rdtsc, __readmsr, __writemsr, __cpuidex)
+#pragma intrinsic(__rdtsc, __readmsr, __writemsr, __cpuidex, __rdtscp)
 
 static h7_stats g_stats = {0};
-
 h7_stats *h7_get_stats(void) { return &g_stats; }
+
+#define CR3_RING_SZ 256
+static ULONG64 g_cr3_ring[CR3_RING_SZ];
+static volatile LONG g_cr3_head = 0;
+static volatile LONG g_cr3_watch = 0;    // bool, togglable via hypercall
 
 static void inject_ud(h7_vcpu *cpu)
 {
@@ -87,6 +91,60 @@ static void on_rdtsc(h7_vcpu *cpu, h7_exit_ctx *ectx)
     cpu->guest_vmcb.save.rip = cpu->guest_vmcb.control.nrip;
 }
 
+static void on_rdtscp(h7_vcpu *cpu, h7_exit_ctx *ectx)
+{
+    ULONG aux = 0;
+    ULONG64 tsc = __rdtscp(&aux) + cpu->tsc_offset;
+    ectx->gprs->rax = (ULONG)tsc;
+    ectx->gprs->rdx = (ULONG)(tsc >> 32);
+    ectx->gprs->rcx = aux;
+    cpu->guest_vmcb.save.rip = cpu->guest_vmcb.control.nrip;
+}
+
+static void on_cr3_write(h7_vcpu *cpu, h7_exit_ctx *ectx)
+{
+    // exit_info1 holds the gpr number that was moved to cr3
+    ULONG64 info = cpu->guest_vmcb.control.exit_info1;
+    ULONG64 gpr  = info & 0xF;
+    ULONG64 val  = 0;
+    switch (gpr) {
+    case 0:  val = ectx->gprs->rax; break;
+    case 1:  val = ectx->gprs->rcx; break;
+    case 2:  val = ectx->gprs->rdx; break;
+    case 3:  val = ectx->gprs->rbx; break;
+    case 5:  val = ectx->gprs->rbp; break;
+    case 6:  val = ectx->gprs->rsi; break;
+    case 7:  val = ectx->gprs->rdi; break;
+    case 8:  val = ectx->gprs->r8;  break;
+    case 9:  val = ectx->gprs->r9;  break;
+    case 10: val = ectx->gprs->r10; break;
+    case 11: val = ectx->gprs->r11; break;
+    case 12: val = ectx->gprs->r12; break;
+    case 13: val = ectx->gprs->r13; break;
+    case 14: val = ectx->gprs->r14; break;
+    case 15: val = ectx->gprs->r15; break;
+    default: val = cpu->guest_vmcb.save.cr3;
+    }
+
+    cpu->guest_vmcb.save.cr3 = val;
+    cpu->guest_vmcb.control.vmcb_clean &= ~(1ULL << 4);   // CRx dirty
+
+    if (g_cr3_watch) {
+        LONG slot = InterlockedIncrement(&g_cr3_head) - 1;
+        g_cr3_ring[slot & (CR3_RING_SZ - 1)] = val;
+    }
+    cpu->guest_vmcb.save.rip = cpu->guest_vmcb.control.nrip;
+}
+
+static void on_npf(h7_vcpu *cpu)
+{
+    // fault address is in exit_info2; info1 bits describe the access
+    ULONG64 gpa  = cpu->guest_vmcb.control.exit_info2;
+    ULONG64 info = cpu->guest_vmcb.control.exit_info1;
+    H7_LOG("NPF gpa=%llx info=%llx rip=%llx", gpa, info, cpu->guest_vmcb.save.rip);
+    // for now re-enter guest; identity map should prevent legitimate faults
+}
+
 static ULONG64 do_hypercall(h7_vcpu *cpu, h7_gp_regs *gprs)
 {
     ULONG64 num = gprs->rax;
@@ -113,6 +171,20 @@ static ULONG64 do_hypercall(h7_vcpu *cpu, h7_gp_regs *gprs)
         void *va = MmGetVirtualForPhysical(pa);
         if (!va) return (ULONG64)-1;
         return *(ULONG64 *)va;
+    }
+
+    case HC_CR3_WATCH:
+        InterlockedExchange(&g_cr3_watch, (LONG)(a1 ? 1 : 0));
+        return 0;
+
+    case HC_CR3_SAMPLE: {
+        // caller provides &out_u64, we fill with the most recent cr3 value
+        if (!a1) return 0;
+        LONG head = g_cr3_head;
+        if (head == 0) return 0;
+        ULONG64 v = g_cr3_ring[(head - 1) & (CR3_RING_SZ - 1)];
+        *(ULONG64 *)a1 = v;
+        return 1;
     }
 
     default:
@@ -146,10 +218,19 @@ BOOLEAN __stdcall h7_handle_exit(h7_vcpu *cpu, h7_gp_regs *gprs)
     bump(&g_stats.total);
 
     switch (code) {
-    case VMEXIT_CPUID:   bump(&g_stats.cpuid);   on_cpuid(cpu, &ectx); break;
-    case VMEXIT_MSR:     bump(&g_stats.msr);     on_msr(cpu, &ectx); break;
-    case VMEXIT_RDTSC:   bump(&g_stats.rdtsc);   on_rdtsc(cpu, &ectx); break;
-    case VMEXIT_VMMCALL: bump(&g_stats.vmmcall); on_vmmcall(cpu, &ectx); break;
+    case VMEXIT_CPUID:     bump(&g_stats.cpuid);     on_cpuid(cpu, &ectx); break;
+    case VMEXIT_MSR:       bump(&g_stats.msr);       on_msr(cpu, &ectx); break;
+    case VMEXIT_RDTSC:     bump(&g_stats.rdtsc);     on_rdtsc(cpu, &ectx); break;
+    case VMEXIT_RDTSCP:    bump(&g_stats.rdtscp);    on_rdtscp(cpu, &ectx); break;
+    case VMEXIT_VMMCALL:   bump(&g_stats.vmmcall);   on_vmmcall(cpu, &ectx); break;
+    case VMEXIT_CR3_WRITE: bump(&g_stats.cr3_write); on_cr3_write(cpu, &ectx); break;
+    case VMEXIT_NPF:       bump(&g_stats.npf);       on_npf(cpu); break;
+
+    case VMEXIT_SHUTDOWN:
+        // guest triple-faulted; let it propagate
+        H7_LOG("guest SHUTDOWN at rip=%llx", cpu->guest_vmcb.save.rip);
+        ectx.wants_off = TRUE;
+        break;
 
     case VMEXIT_VMRUN:
     case VMEXIT_VMLOAD:
