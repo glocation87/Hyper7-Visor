@@ -1,0 +1,11 @@
+build/
+*.obj
+*.pdb
+*.lib
+*.exp
+*.ilk
+*.sys
+*.cer
+/ctl/target/
+.vs/
+*.user
